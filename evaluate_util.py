@@ -214,6 +214,9 @@ def main(cfg):
     if os.environ.get('LOCAL_RANK') is not None:
         local_rank = int(os.environ.get('LOCAL_RANK', '0'))
         device_map = {'': local_rank}
+    else:
+        local_rank = 0
+        device_map = {'': 0}
 
     os.environ["WANDB_DISABLED"] = "true"
     model_cfg = get_model_identifiers_from_yaml(cfg.model_family)
@@ -231,10 +234,10 @@ def main(cfg):
         # do thing
             if cfg.use_pretrained:
                 print(f"Loading pretrained from {model_id}")
-                model = AutoModelForCausalLM.from_pretrained(model_id, config=config, use_flash_attention_2=model_cfg["flash_attention2"]=="true", torch_dtype=torch.bfloat16, trust_remote_code = True, device_map=device_map)
+                model = AutoModelForCausalLM.from_pretrained(model_id, config=config, use_flash_attention_2=model_cfg["flash_attention2"]=="true", torch_dtype=torch.bfloat16, device_map=device_map)
             else:
                 print(f"Loading checkpoint from {cfg.model_path}")
-                model = AutoModelForCausalLM.from_pretrained(cfg.model_path, config=config, use_flash_attention_2=model_cfg["flash_attention2"]=="true", torch_dtype=torch.bfloat16, trust_remote_code = True, device_map=device_map)
+                model = AutoModelForCausalLM.from_pretrained(cfg.model_path, config=config, use_flash_attention_2=model_cfg["flash_attention2"]=="true", torch_dtype=torch.bfloat16, device_map=device_map)
         except Exception as e:
             print(e)
             continue
@@ -303,12 +306,15 @@ def eval_accuracy(logits, labels):
 
 def run_generation(cfg, batch, model, tokenizer):
     input_ids = batch["input_ids"]
-    input_strings = tokenizer.batch_decode(input_ids, skip_special_tokens=True)
-    split_symbol = " [/INST]" if cfg.model_family == 'llama2-7b' else 'Answer: '
+    input_strings = tokenizer.batch_decode(input_ids)
+    input_strings = [s.replace(tokenizer.eos_token, '') for s in input_strings]
+    # input_strings = tokenizer.batch_decode(input_ids, skip_special_tokens=True)
+    # split_symbol = " [/INST]" if cfg.model_family == 'llama2-7b' else 'Answer: '
+    split_symbol = "<|assistant|> "
     ground_truth = [s.split(split_symbol)[1] for s in input_strings]
     input_strings = [s.split(split_symbol)[0] for s in input_strings]
     #add ["/INST "] to the end of each string
-    if cfg.model_family == 'llama2-7b':
+    if cfg.model_family == 'llama2-7b' or cfg.model_family == 'phi-3.5':
         input_strings = [s + split_symbol for s in input_strings]
         
     #we only want to retain the input before the [/INST] token. split each string to only retain the content before the [/INST] token

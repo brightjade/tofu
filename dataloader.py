@@ -14,6 +14,7 @@ import numpy as np
 from scipy.stats import ks_2samp, hmean
 import csv 
 from transformers.integrations.deepspeed import deepspeed_init, deepspeed_load_checkpoint, is_deepspeed_available
+from optout import sliced_wasserstein_distance
 
 def printll(name, inp):
     #print list with 4 decimal for each item
@@ -158,17 +159,73 @@ class CustomTrainerForgetting(Trainer):
                 forget_logits_oracle = forget_outputs_oracle.logits
 
             idk_loss_oracle = -1 * get_batch_loss(idk_logits_oracle, idk_labels)
-            forget_loss_oracle = -1 * get_batch_loss(forget_logits_oracle, labels)
+            forget_loss_oracle = -1 * get_batch_loss(forget_logits_oracle, forget_labels)
             
             idk_loss_current = -1 * get_batch_loss(idk_outputs.logits, idk_labels)
-            forget_loss_current = -1 * get_batch_loss(forget_outputs.logits, labels)
-
+            forget_loss_current = -1 * get_batch_loss(forget_outputs.logits, forget_labels)
 
             pi_logratios = idk_loss_current - forget_loss_current
             ref_logratios = idk_loss_oracle - forget_loss_oracle
 
             beta = 0.1
-            loss = -F.logsigmoid(beta * (pi_logratios - ref_logratios)).mean()
+            forget_loss = -F.logsigmoid(beta * (pi_logratios - ref_logratios)).mean()
+            
+            retain_input_ids, retain_labels, retain_attention_mask = retain_inputs
+            retain_outputs = model(retain_input_ids,labels=retain_labels, attention_mask=retain_attention_mask)
+            retain_loss = retain_outputs.loss
+            loss = forget_loss + retain_loss
+
+            outputs = forget_outputs
+        
+        elif self.loss_type == "npo":
+            forget_inputs, retain_inputs = inputs
+            forget_input_ids, forget_labels, forget_attention_mask = forget_inputs
+            forget_outputs = model(forget_input_ids,labels=forget_labels, attention_mask=forget_attention_mask)
+            with torch.no_grad():
+                forget_outputs_oracle = self.oracle_model(forget_input_ids,labels=forget_labels, attention_mask=forget_attention_mask)
+                forget_logits_oracle = forget_outputs_oracle.logits
+
+            forget_loss_oracle = get_batch_loss(forget_logits_oracle, forget_labels)
+            forget_loss_current = get_batch_loss(forget_outputs.logits, forget_labels)
+            
+            neg_log_ratios = forget_loss_current - forget_loss_oracle
+            beta = 0.1
+            forget_loss = -F.logsigmoid(beta * neg_log_ratios).mean() * 2 / beta
+
+            retain_input_ids, retain_labels, retain_attention_mask = retain_inputs
+            retain_outputs = model(retain_input_ids,labels=retain_labels, attention_mask=retain_attention_mask)
+            retain_loss = retain_outputs.loss
+            loss = forget_loss + retain_loss
+            
+            outputs = forget_outputs
+        
+        elif self.loss_type == "ot":
+            forget_inputs, retain_inputs = inputs
+            forget_input_ids, forget_labels, forget_attention_mask = forget_inputs
+            forget_outputs = model(forget_input_ids,labels=forget_labels, attention_mask=forget_attention_mask)
+            with torch.no_grad():
+                forget_outputs_oracle = self.oracle_model(forget_input_ids,labels=forget_labels, attention_mask=forget_attention_mask)
+                forget_logits_oracle = forget_outputs_oracle.logits
+
+            forget_loss_oracle = get_batch_loss(forget_logits_oracle, forget_labels)
+            forget_loss_current = get_batch_loss(forget_outputs.logits, forget_labels)
+            
+            neg_log_ratios = forget_loss_current - forget_loss_oracle
+            beta = 0.1
+            forget_loss = -F.logsigmoid(beta * neg_log_ratios).mean() * 2 / beta
+
+            retain_input_ids, retain_labels, retain_attention_mask = retain_inputs
+            retain_outputs = model(retain_input_ids,labels=retain_labels, attention_mask=retain_attention_mask)
+            retain_loss = retain_outputs.loss
+            loss = forget_loss + retain_loss
+            
+            reg = 0.0
+            for ref_param, param in zip(self.oracle_model.parameters(), model.parameters()):
+                if len(param.shape) == 1:
+                    reg += sliced_wasserstein_distance(ref_param.unsqueeze(0), param.unsqueeze(0)).to(loss.device)
+                else:
+                    reg += sliced_wasserstein_distance(ref_param, param).to(loss.device)
+            loss = loss + 0.1 * reg
 
             outputs = forget_outputs
         
@@ -314,6 +371,17 @@ def custom_data_collator_forget(samples):
         rets.append((torch.stack(input_ids), torch.stack(labels), torch.stack(attention_mask)))
     return rets
 
+
+def custom_data_collator_forget_dpo(samples):
+    forget_samples, retain_samples = [sample[0] for sample in samples], [sample[1] for sample in samples]
+    rets = []
+    for data_type in ["idk", "forget", "retain"]:
+        data = forget_samples if data_type == "forget" else retain_samples
+        input_ids = [s[0] for s in data]
+        labels = [s[1] for s in data]
+        attention_mask = [s[2] for s in data]
+        rets.append((torch.stack(input_ids), torch.stack(labels), torch.stack(attention_mask)))
+    return rets
 
 
 def compute_metrics(pred):

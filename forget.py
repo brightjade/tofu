@@ -1,5 +1,5 @@
 from data_module import TextForgetDatasetQA, TextForgetDatasetDPOQA
-from dataloader import CustomTrainerForgetting, custom_data_collator_forget
+from dataloader import CustomTrainerForgetting, custom_data_collator_forget, custom_data_collator_forget_dpo
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig, set_seed
 
@@ -45,6 +45,7 @@ def main(cfg):
     if os.environ.get('LOCAL_RANK') is not None:
         local_rank = int(os.environ.get('LOCAL_RANK', '0'))
         device_map = {'': local_rank}
+    
 
     set_seed(cfg.seed)
 
@@ -58,7 +59,8 @@ def main(cfg):
     print("Saving to: ", cfg.save_dir)
     print("######################")
     # save cfg in cfg.save_dir
-    if local_rank == 0:
+    if os.environ.get('LOCAL_RANK') is None or local_rank == 0:
+        device_map = {'': 0}
         if os.path.exists(cfg.save_dir):
             print("Directory already exists")
             if not cfg.overwrite_dir:
@@ -102,7 +104,7 @@ def main(cfg):
             save_steps=steps_per_epoch,
             save_only_model=True,
             ddp_find_unused_parameters= False,
-            deepspeed='config/ds_config.json',
+            # deepspeed='config/ds_config.json',
             weight_decay = cfg.weight_decay,
             eval_steps = steps_per_epoch,
             evaluation_strategy = "steps" if cfg.eval_while_train else "no",
@@ -129,9 +131,9 @@ def main(cfg):
         config = AutoConfig.from_pretrained(model_id)
 
         print("Loading from checkpoint")
-        model = AutoModelForCausalLM.from_pretrained(cfg.model_path, config=config, use_flash_attention_2=model_cfg["flash_attention2"]=="true", torch_dtype=torch.bfloat16, trust_remote_code = True)
-        if cfg.forget_loss == "KL":
-            oracle_model = AutoModelForCausalLM.from_pretrained(cfg.model_path, config=config, use_flash_attention_2=model_cfg["flash_attention2"]=="true", torch_dtype=torch.bfloat16, trust_remote_code = True)
+        model = AutoModelForCausalLM.from_pretrained(cfg.model_path, config=config, use_flash_attention_2=model_cfg["flash_attention2"]=="true", torch_dtype=torch.bfloat16)
+        if cfg.forget_loss == "KL" or cfg.forget_loss == "dpo" or cfg.forget_loss == "npo" or cfg.forget_loss == "ot":
+            oracle_model = AutoModelForCausalLM.from_pretrained(cfg.model_path, config=config, use_flash_attention_2=model_cfg["flash_attention2"]=="true", torch_dtype=torch.bfloat16, device_map=device_map)
 
     else:
         print("Loading after merge and unload")
@@ -171,7 +173,7 @@ def main(cfg):
         compute_metrics=None,                # the callback for computing metrics, None in this case since you're doing it in your callback
         # callbacks=[GlobalStepDeletionCallback],
         args=training_args,
-        data_collator=custom_data_collator_forget,
+        data_collator=custom_data_collator_forget_dpo if cfg.forget_loss == "dpo" else custom_data_collator_forget,
         oracle_model = oracle_model,
         forget_loss = cfg.forget_loss,
         eval_cfg = cfg.eval,
